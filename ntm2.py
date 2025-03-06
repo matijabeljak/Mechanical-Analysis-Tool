@@ -1,6 +1,7 @@
 import pygame
 import math
 import sys
+import pickle
 from pygame.locals import *
 
 # Initialize Pygame
@@ -203,9 +204,9 @@ class BeamEditor:
         y += 30
         for element in self.elements:
             if isinstance(element, Force):
-                text = f"Force: {element.value:.1f}N {'↓' if element.direction == -1 else '↑'}"
+                text = f"Force: {element.value * element.direction:.1f}N {'↓' if element.direction == -1 else '↑'}"
             elif isinstance(element, Moment):
-                text = f"Moment: {element.value:.1f}Nm {'CW' if element.direction == 1 else 'CCW'}"
+                text = f"Moment: {element.value * element.direction:.1f}Nm {'CW' if element.direction == 1 else 'CCW'}"
             elif isinstance(element, Support):
                 text = f"Support: {'Pinned' if element.type == 'pinned' else 'Roller'}"
             self.screen.blit(font.render(text, True, COLORS['text']), (SCREEN_SIZE[0]-280, y))
@@ -222,7 +223,7 @@ class BeamEditor:
             y += 30
             
             # Value editor
-            value_text = f"Value: {self.value_str}" if self.editing_value else f"Value: {self.selected_element.value:.1f}"
+            value_text = f"Value: {self.value_str}" if self.editing_value else f"Value: {self.selected_element.value * abs(self.selected_element.direction):.1f}"
             self.screen.blit(font.render(value_text, True, COLORS['text']), (SCREEN_SIZE[0]-280, y))
             y += 30
             
@@ -292,35 +293,35 @@ class BeamEditor:
     def calculate_reactions(self):
         sum_Fx = 0
         sum_Fz = 0
-        sum_M = 0
-        
-        # Calculate applied forces and moments
-        for element in self.elements:
-            if isinstance(element, Force):
-                fx, fz = element.get_components()
-                sum_Fx += fx
-                sum_Fz += fz
-                sum_M += fx * element.x
-            elif isinstance(element, Moment):
-                sum_M += element.value
-        
-        # Get supports
+        sum_M_about_A = 0
+
         supports = [s for s in self.elements if isinstance(s, Support)]
         reactions = {}
-        
+
         if len(supports) >= 2:
-            # Simple 2-support case
             A = supports[0]
             B = supports[1]
-            
-            # Sum moments about A
-            M_about_A = sum_M - sum_Fz * (B.x - A.x)
-            Rb = M_about_A / (B.x - A.x)
-            Ra = sum_Fz - Rb
-            
-            reactions[A] = (0, Ra)
-            reactions[B] = (0, Rb)
-            
+
+            for element in self.elements:
+                if isinstance(element, Force):
+                    fx, fz = element.get_components()
+                    sum_Fx += fx
+                    sum_Fz += fz
+                    sum_M_about_A += fz * (element.x - A.x)
+                elif isinstance(element, Moment):
+                    sum_M_about_A += element.value * element.direction
+
+            # Calculate reactions
+            try:
+                R_By = -sum_M_about_A / (B.x - A.x)
+            except ZeroDivisionError:
+                R_By = 0
+            R_Ay = -sum_Fz - R_By
+            R_Ax = -sum_Fx
+
+            reactions[A] = (R_Ax, R_Ay)
+            reactions[B] = (0, R_By)
+
         return reactions
 
     def calculate_internal_forces(self):
@@ -341,6 +342,7 @@ class BeamEditor:
                 if support.x < x:
                     V += Rz
                     M += Rz * (x - support.x)
+                N += Rx  # Horizontal reactions contribute to normal force
             
             # Add applied forces and moments
             for element in self.elements:
@@ -350,7 +352,7 @@ class BeamEditor:
                     V += fz
                     M += fz * (x - element.x)
                 elif isinstance(element, Moment) and element.x < x:
-                    M += element.value
+                    M += element.value * element.direction
             
             self.N[i] = N
             self.V[i] = V
@@ -362,9 +364,11 @@ class BeamEditor:
                 f.write(f"BeamLength,{self.beam_length}\n")
                 for element in self.elements:
                     if isinstance(element, Force):
-                        f.write(f"Force,{element.x},{element.value},{element.angle}\n")
+                        magnitude = element.value * element.direction
+                        f.write(f"Force,{element.x},{magnitude},{element.angle}\n")
                     elif isinstance(element, Moment):
-                        f.write(f"Moment,{element.x},{element.value}\n")
+                        magnitude = element.value * element.direction
+                        f.write(f"Moment,{element.x},{magnitude}\n")
                     elif isinstance(element, Support):
                         f.write(f"Support,{element.x},{element.type}\n")
             print(f"Project saved to {filename}")
@@ -380,11 +384,18 @@ class BeamEditor:
                     if parts[0] == "BeamLength":
                         self.beam_length = float(parts[1])
                     elif parts[0] == "Force":
-                        self.elements.append(Force(float(parts[1]), float(parts[2]), float(parts[3])))
+                        x = float(parts[1])
+                        magnitude = float(parts[2])
+                        angle = float(parts[3])
+                        self.elements.append(Force(x, magnitude, angle))
                     elif parts[0] == "Moment":
-                        self.elements.append(Moment(float(parts[1]), float(parts[2])))
+                        x = float(parts[1])
+                        magnitude = float(parts[2])
+                        self.elements.append(Moment(x, magnitude))
                     elif parts[0] == "Support":
-                        self.elements.append(Support(float(parts[1]), parts[2]))
+                        x = float(parts[1])
+                        support_type = parts[2]
+                        self.elements.append(Support(x, support_type))
             self.calculate_internal_forces()
             print(f"Project loaded from {filename}")
         except Exception as e:
@@ -405,18 +416,15 @@ class BeamEditor:
                 self.handle_text_input(event.text)
 
     def handle_mouse_click(self, mouse_pos, button):
-        # Delete element on right click
         if button == 3:  # Right click
             self.delete_selected_element()
             return
-        # Toolbar
         if mouse_pos[0] < UI_PANEL_WIDTH:
             for i, (mode, _, pos) in enumerate(self.tools):
                 if pos[1] < mouse_pos[1] < pos[1] + 40:
                     self.mode = mode
                     return
                     
-        # Properties panel
         if mouse_pos[0] > SCREEN_SIZE[0] - PROP_PANEL_WIDTH:
             if self.selected_element and isinstance(self.selected_element, (Force, Moment)):
                 y = 170 + 30 * (3 + len(self.elements))
@@ -425,9 +433,8 @@ class BeamEditor:
                     self.calculate_internal_forces()
             return
         
-        # Beam area
         beam_x = self.screen_to_beam_x(mouse_pos[0])
-        if button == 1:  # Left click
+        if button == 1:
             if self.mode == 'force':
                 new_force = Force(beam_x, 100)
                 self.elements.append(new_force)
@@ -450,20 +457,18 @@ class BeamEditor:
                         closest = element
                 self.selected_element = closest
             self.calculate_internal_forces()
-        elif button == 3 and self.selected_element:  # Right click
+        elif button == 3 and self.selected_element:
             self.elements.remove(self.selected_element)
             self.selected_element = None
             self.calculate_internal_forces()
             
     def handle_keyboard(self, event):
-        if event.key == K_LCTRL or event.key == K_RCTRL:
-            self.ctrl_pressed = True
-        elif event.key == K_s and self.ctrl_pressed:
-            self.save_project("project.ntmd")
-        elif event.key == K_o and self.ctrl_pressed:
-            self.load_project("project.ntmd")
         if event.key == K_ESCAPE:
             self.selected_element = None
+        elif event.key == K_s and (pygame.key.get_mods() & KMOD_CTRL):
+            self.save_project("project.ntmd")
+        elif event.key == K_o and (pygame.key.get_mods() & KMOD_CTRL):
+            self.load_project("project.ntmd")
         elif event.key == K_s:
             self.mode = 'select'
         elif event.key == K_f:
@@ -488,16 +493,18 @@ class BeamEditor:
                     self.selected_element.value *= 0.9
                     self.calculate_internal_forces()
             elif event.key == K_d:
-                if isinstance(self.selected_element, Force):
+                if isinstance(self.selected_element, (Force, Moment)):
                     self.selected_element.direction *= -1
-                elif isinstance(self.selected_element, Moment):
-                    self.selected_element.direction *= -1
-                self.calculate_internal_forces()
+                    self.calculate_internal_forces()
             elif event.key == K_RETURN:
                 self.editing_value = False
                 if self.value_str:
                     try:
-                        self.selected_element.value = float(self.value_str)
+                        self.selected_element.value = abs(float(self.value_str))
+                        if isinstance(self.selected_element, Force):
+                            self.selected_element.direction = -1 if float(self.value_str) < 0 else 1
+                        elif isinstance(self.selected_element, Moment):
+                            self.selected_element.direction = 1 if float(self.value_str) >= 0 else -1
                         self.calculate_internal_forces()
                     except ValueError:
                         pass
@@ -512,31 +519,21 @@ class BeamEditor:
 
     def handle_text_input(self, text):
         if self.selected_element and (text.isdigit() or text in ['.', '-']):
-            if text == '-' and isinstance(self.selected_element, Moment):
-                self.selected_element.direction *= -1
-                self.calculate_internal_forces()
+            if text == '-' and self.value_str == "":
+                self.value_str = "-"
             else:
                 self.editing_value = True
                 self.value_str += text
                 try:
-                    self.selected_element.value = float(self.value_str)
+                    value = float(self.value_str)
+                    self.selected_element.value = abs(value)
+                    if isinstance(self.selected_element, Force):
+                        self.selected_element.direction = -1 if value < 0 else 1
+                    elif isinstance(self.selected_element, Moment):
+                        self.selected_element.direction = 1 if value >= 0 else -1
                     self.calculate_internal_forces()
                 except ValueError:
                     pass
-    def save_project(self):
-        data = {
-            'beam_length': self.beam_length,
-            'elements': self.elements,
-            'scale': self.scale,
-            'offset_x': self.offset_x
-        }
-        
-        try:
-            with open("project.ntmd", "wb") as f:
-                pickle.dump(data, f)
-            print("Project saved successfully!")
-        except Exception as e:
-            print(f"Error saving project: {str(e)}")
 
     def delete_selected_element(self):
         if self.selected_element:
@@ -550,12 +547,10 @@ class BeamEditor:
             self.screen.fill(COLORS['background'])
             self.handle_events()
             
-            # Draw main view
             self.draw_beam()
             self.draw_elements()
             self.draw_coordinate_system()
             
-            # Draw UI elements
             self.draw_toolbar()
             self.draw_properties_panel()
             self.draw_diagrams()
