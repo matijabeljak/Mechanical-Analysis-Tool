@@ -1,5 +1,5 @@
 # Beam Editor Documentation
-written by AI xD
+(OLD VERSION!!! DOCUMENTATION WRITTEN BY AI)
 This documentation describes the functionality of the Pygame-based **Beam Editor** application, which allows users to simulate structural elements (forces, moments, supports) on a beam and visualize internal forces/moments. Below is a breakdown of all classes, methods, and key functions.
 
 ---
